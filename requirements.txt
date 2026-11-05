@@ -1,0 +1,8 @@
+chainlit
+tavily-python
+python-dotenv
+PyMuPDF
+python-docx
+groq
+qdrant-client
+fastembed
