@@ -8,6 +8,7 @@ from pathlib import Path
 
 import chainlit as cl
 import fitz
+from chainlit.context import context
 from docx import Document
 from dotenv import load_dotenv
 from groq import (
@@ -19,6 +20,7 @@ from groq import (
     RateLimitError,
 )
 from tavily import TavilyClient
+from qdrant_service import qdrant_service
 
 # Load API keys
 load_dotenv("backend/.env")
@@ -151,36 +153,6 @@ def chunk_document(sections: list[dict], filename: str) -> list[dict]:
     return chunks
 
 
-def retrieve_chunks(question: str, chunks: list[dict], limit: int = 4) -> list[dict]:
-    """Retrieve chunks using a small keyword-overlap score."""
-
-    question_words = set(re.findall(r"\b\w{3,}\b", question.lower()))
-    scored_chunks = []
-
-    for chunk in chunks:
-        chunk_words = set(re.findall(r"\b\w{3,}\b", chunk["text"].lower()))
-        matching_words = question_words & chunk_words
-        score = len(matching_words) / max(len(question_words), 1)
-        if score > 0:
-            scored_chunks.append({**chunk, "score": round(score, 4)})
-
-    scored_chunks.sort(key=lambda item: item["score"], reverse=True)
-    retrieved = scored_chunks[:limit]
-    debug_log("[RETRIEVAL]", {
-        "method": "keyword overlap",
-        "number_retrieved": len(retrieved),
-        "chunks": [
-            {
-                "id": chunk["id"],
-                "relevance_score": chunk["score"],
-                "text": chunk["text"],
-            }
-            for chunk in retrieved
-        ],
-    })
-    return retrieved
-
-
 def format_document_context(chunks: list[dict]) -> str:
     """Format retrieved chunks so Groq can distinguish sources from the question."""
 
@@ -197,7 +169,13 @@ def format_document_context(chunks: list[dict]) -> str:
     return "\n\n".join(context_parts)
 
 
-async def process_uploaded_file(element) -> dict:
+def get_session_id() -> str:
+    """Use Chainlit's stable thread ID as the Qdrant session partition."""
+
+    return context.session.thread_id
+
+
+async def process_uploaded_file(element, session_id: str) -> dict:
     """Validate, extract, chunk, and store one uploaded document."""
 
     filename = element.name or "uploaded_document"
@@ -238,12 +216,30 @@ async def process_uploaded_file(element) -> dict:
             )
         raise ValueError("No readable text was found in the document.")
 
+    with open(file_path, "rb") as uploaded_file:
+        document_id = qdrant_service.document_id(session_id, uploaded_file.read())
+
+    if not cl.user_session.get("qdrant_ready", False):
+        raise RuntimeError(
+            "Document search is unavailable because Qdrant is not connected."
+        )
+
+    vector_count = await asyncio.to_thread(
+        qdrant_service.upsert_document,
+        chunks,
+        session_id,
+        document_id,
+    )
     document_state = {
+        "document_id": document_id,
         "filename": filename,
         "page_count": page_count,
         "chunks": chunks,
+        "vector_count": vector_count,
     }
-    cl.user_session.set("document", document_state)
+    documents = cl.user_session.get("documents", {})
+    documents[document_id] = document_state
+    cl.user_session.set("documents", documents)
     return document_state
 
 
@@ -350,7 +346,28 @@ tools = [
 @cl.on_chat_start
 async def start_chat():
     cl.user_session.set("messages", [])
-    cl.user_session.set("document", None)
+    cl.user_session.set("documents", {})
+    cl.user_session.set("qdrant_ready", False)
+    session_id = get_session_id()
+    debug_log("[QDRANT]", {
+        "event": "initializing",
+        "session_id": session_id,
+    })
+    try:
+        await asyncio.to_thread(qdrant_service.initialize)
+        cl.user_session.set("qdrant_ready", True)
+        collection_details = await asyncio.to_thread(
+            qdrant_service.verify_connection
+        )
+        debug_log("[QDRANT]", {
+            "event": "ready",
+            "collection": collection_details,
+        })
+    except Exception as error:
+        debug_log("[QDRANT]", {
+            "event": "unavailable",
+            "error": str(error),
+        })
 
     await cl.Message(
         content=(
@@ -531,6 +548,7 @@ async def call_groq(query: str, document_context: str | None = None):
 
 @cl.on_message
 async def chat(message: cl.Message):
+    session_id = get_session_id()
     uploaded_elements = [
         element for element in message.elements
         if getattr(element, "name", None) or getattr(element, "path", None)
@@ -545,7 +563,10 @@ async def chat(message: cl.Message):
             return
 
         try:
-            document = await process_uploaded_file(uploaded_elements[0])
+            document = await process_uploaded_file(
+                uploaded_elements[0],
+                session_id,
+            )
             page_summary = (
                 str(document["page_count"])
                 if document["page_count"]
@@ -557,6 +578,7 @@ async def chat(message: cl.Message):
                     f"Filename: {document['filename']}\n"
                     f"Pages extracted: {page_summary}\n"
                     f"Text chunks created: {len(document['chunks'])}\n"
+                    f"Vectors indexed: {document['vector_count']}\n"
                     "You can now ask questions about this document."
                 ),
                 author="Groq",
@@ -572,14 +594,52 @@ async def chat(message: cl.Message):
         if not message.content.strip():
             return
 
-    document = cl.user_session.get("document")
+    documents = cl.user_session.get("documents", {})
     document_context = None
-    if document:
-        retrieved_chunks = await asyncio.to_thread(
-            retrieve_chunks,
-            message.content,
-            document["chunks"],
-        )
-        document_context = format_document_context(retrieved_chunks)
+    if documents:
+        if not cl.user_session.get("qdrant_ready", False):
+            await cl.Message(
+                content="Document search is unavailable because Qdrant is not connected.",
+                author="System",
+            ).send()
+            return
+        try:
+            started_at = asyncio.get_running_loop().time()
+            retrieved_chunks = await asyncio.to_thread(
+                qdrant_service.retrieve,
+                message.content,
+                session_id,
+                4,
+            )
+            retrieval_duration = asyncio.get_running_loop().time() - started_at
+            debug_log("[RETRIEVAL]", {
+                "method": "Qdrant semantic search",
+                "session_id": session_id,
+                "duration_seconds": round(retrieval_duration, 4),
+                "number_retrieved": len(retrieved_chunks),
+                "chunks": retrieved_chunks,
+            })
+            document_context = format_document_context(retrieved_chunks)
+        except Exception as error:
+            debug_log("[QDRANT RETRIEVAL ERROR]", str(error))
+            await cl.Message(
+                content="Document search failed. Please try again or upload the document again.",
+                author="System",
+            ).send()
+            return
 
     await call_groq(message.content, document_context)
+
+
+@cl.on_chat_end
+async def cleanup_chat():
+    """Best-effort cleanup; session filters prevent cross-session deletion."""
+
+    try:
+        await asyncio.to_thread(qdrant_service.delete_session, get_session_id())
+        debug_log("[QDRANT]", {"event": "session vectors deleted"})
+    except Exception as error:
+        debug_log("[QDRANT CLEANUP]", {
+            "event": "cleanup skipped",
+            "error": str(error),
+        })
