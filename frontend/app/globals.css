@@ -1,0 +1,27 @@
+* { box-sizing: border-box; }
+body { margin: 0; color: #172033; background: #f8f9fc; font-family: Arial, sans-serif; }
+main { max-width: 1080px; margin: 0 auto; padding: 32px 20px 60px; }
+header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 70px; }
+.brand { color: #4f46e5; font-weight: 800; font-size: 20px; }
+h1 { max-width: 720px; margin: 0 0 18px; font-size: clamp(38px, 7vw, 70px); line-height: 1.03; letter-spacing: -2px; }
+h2 { margin-top: 0; }
+.hero { padding: 28px 0 48px; }
+.eyebrow { color: #5b5bd6; font-weight: 700; }
+.subtitle { max-width: 620px; color: #637087; font-size: 19px; line-height: 1.55; }
+.card-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 38px; }
+.card, .workspace { background: white; border: 1px solid #e4e7ef; border-radius: 16px; padding: 22px; box-shadow: 0 10px 30px #1720330b; }
+.workspace { max-width: 780px; margin: 0 auto; }
+label { display: block; margin: 18px 0 7px; font-weight: 700; }
+input, textarea { width: 100%; padding: 12px 14px; border: 1px solid #cfd5e2; border-radius: 10px; font: inherit; }
+textarea { min-height: 130px; resize: vertical; }
+button { border: 0; border-radius: 10px; padding: 12px 18px; background: #4f46e5; color: white; font-weight: 700; cursor: pointer; }
+button.secondary { background: #eef0ff; color: #4338ca; }
+button:disabled { opacity: .55; cursor: wait; }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+.status { margin-top: 14px; color: #536174; white-space: pre-wrap; }
+.error { color: #b42318; }
+.chat { min-height: 220px; max-height: 440px; overflow: auto; margin: 18px 0; }
+.message { padding: 12px 14px; border-radius: 12px; margin: 9px 0; white-space: pre-wrap; }
+.user { background: #eef0ff; margin-left: 12%; }
+.assistant { background: #f1f3f6; margin-right: 12%; }
+@media (max-width: 700px) { header { margin-bottom: 35px; } .card-grid { grid-template-columns: 1fr; } .user, .assistant { margin-left: 0; margin-right: 0; } }
